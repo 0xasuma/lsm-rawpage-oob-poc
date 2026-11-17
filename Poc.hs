@@ -114,6 +114,10 @@ variantProductionPath = do
 
 -- | Variant 3: production shape -- the array is exactly 4096 bytes (as
 -- readDiskPage allocates), header points at byte 65520.
+--
+-- The key bytes are FORCED (sum of their lengths), not just the vector length:
+-- V.length on V.fromList never touches the elements, so a length-only check
+-- would report "2 keys" without ever performing the read.
 variantPastEndOfAllocation :: IO Bool
 variantPastEndOfAllocation = do
     ba <- buildPinned pageSize
@@ -122,7 +126,9 @@ variantPastEndOfAllocation = do
             , (4, w16 0xFFF0)   -- key directory "at byte 65520" in a 4096-byte page
             ]
     let page = unsafeMakeRawPage ba 0
-    r <- try (evaluate (V.length (rawPageKeys page))) :: IO (Either SomeException Int)
+    r <- try (evaluate (sum [ length (RB.unpack rb)
+                            | SerialisedKey rb <- V.toList (rawPageKeys page) ]))
+           :: IO (Either SomeException Int)
     putStrLn $ "  sizeofByteArray        = " ++ show (sizeofByteArray ba)
     putStrLn $ "  keysOffset (header)    = 0xFFF0 = 65520 bytes"
     case r of
@@ -131,8 +137,8 @@ variantPastEndOfAllocation = do
         putStrLn "  RESULT: bounded (guard fired)"
         pure False
       Right n -> do
-        putStrLn $ "  rawPageKeys            = returned " ++ show n ++ " keys, NO exception"
-        putStrLn "  RESULT: FAIL-OPEN -- read ~61 KB past the end of a 4096-byte allocation"
+        putStrLn $ "  total key bytes read   = " ++ show n ++ ", NO exception"
+        putStrLn "  RESULT: FAIL-OPEN -- key bytes read from ~61 KB past a 4096-byte allocation"
         pure True
 
 main :: IO ()
