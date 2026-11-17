@@ -23,8 +23,11 @@
 module Main (main) where
 
 import           Control.Exception (SomeException, evaluate, try)
+import           Control.Monad (when)
 import           Data.Primitive.ByteArray
 import           Data.Word (Word16, Word8)
+import           GHC.Exts (RealWorld)
+import           System.Exit (exitFailure)
 import           Database.LSMTree.Internal.RawBytes (RawBytes (..))
 import qualified Database.LSMTree.Internal.RawBytes as RB
 import           Database.LSMTree.Internal.RawPage
@@ -72,6 +75,7 @@ variantOutsidePageRegion = do
     putStrLn $ if leaked
       then "  RESULT: FAIL-OPEN -- offsets beyond the page were honoured"
       else "  RESULT: guard present (offsets rejected or bounded)"
+    when leaked exitFailure
 
 -- | Production shape: array is exactly 4096 bytes, header points far outside.
 variantPastEndOfAllocation :: IO ()
