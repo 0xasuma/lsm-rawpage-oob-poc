@@ -90,8 +90,17 @@ tamperBundle root bogusOffset = do
     if null keyops || null sums
       then pure Nothing
       else do
+        -- diagnostics: what do the checksums files actually contain?
+        mapM_ (\sf -> do
+                 t <- BS.readFile sf
+                 putStrLn ("  BEFORE " ++ sf)
+                 mapM_ (\l -> putStrLn ("      | " ++ BSC.unpack l)) (BSC.lines t)) sums
         mapM_ (patchFile bogusOffset) keyops
         mapM_ repairChecksums sums
+        mapM_ (\sf -> do
+                 t <- BS.readFile sf
+                 putStrLn ("  AFTER  " ++ sf)
+                 mapM_ (\l -> putStrLn ("      | " ++ BSC.unpack l)) (BSC.lines t)) sums
         pure $ Just (show (length keyops) ++ " .keyops patched at keysOffset=0x"
                      ++ hex8 (fromIntegral bogusOffset)
                      ++ ", " ++ show (length sums) ++ " .checksums repaired")
@@ -121,7 +130,10 @@ tamperBundle root bogusOffset = do
                 , BSC.length rhs == 8 -> do
                     let fp = dir ++ "/" ++ BSC.unpack name
                     exists <- Dir.doesFileExist fp
-                    if not exists then pure l else do
+                    if not exists
+                      then do putStrLn ("      !! no sibling file for entry: " ++ BSC.unpack name)
+                              pure l
+                      else do
                       bs <- BS.readFile fp
                       let CRC.CRC32C w = CRC.updateCRC32C bs CRC.initialCRC32C
                       pure $ "CRC32C (" <> name <> ") = "
