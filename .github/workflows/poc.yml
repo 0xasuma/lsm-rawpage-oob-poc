@@ -15,8 +15,8 @@ jobs:
       - uses: haskell-actions/setup@v2
         id: setup
         with:
-          ghc-version: '9.8.4'
-          cabal-version: '3.12'
+          ghc-version: '9.6.6'
+          cabal-version: '3.10.3.0'
 
       - name: Fetch upstream lsm-tree at audited commit
         run: |
@@ -26,7 +26,7 @@ jobs:
           git log --oneline -1
           mkdir -p lsm-tree/poc
           cp ../Poc.hs lsm-tree/poc/Poc.hs
-          cat ../poc-stanza.cabal >> lsm-tree/lsm-tree.cabal
+          cat ../poc-stanza.txt >> lsm-tree/lsm-tree.cabal
           printf 'index-state: hackage.haskell.org 2025-06-01T00:00:00Z\n' > cabal.project.local
           cabal update
 
