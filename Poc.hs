@@ -26,10 +26,12 @@ import           Data.List (foldl')
 import           Data.Primitive.ByteArray
 import qualified Data.Vector as V
 import           Data.Word (Word16, Word8)
+import           Database.LSMTree.Internal.BlobRef (BlobSpan)
 import           Database.LSMTree.Internal.Entry (Entry)
 import qualified Database.LSMTree.Internal.RawBytes as RB
 import           Database.LSMTree.Internal.RawPage
-import           Database.LSMTree.Internal.Serialise (SerialisedKey (..))
+import           Database.LSMTree.Internal.Serialise (SerialisedKey (..),
+                     SerialisedValue)
 import           System.Exit (exitFailure)
 
 pageSize :: Int
@@ -87,7 +89,7 @@ variantKeys = do
 variantProductionPath :: IO ()
 variantProductionPath = do
     page <- craftedPage
-    let res = rawPageIndex page 0 :: RawPageIndex (Entry v b)
+    let res = rawPageIndex page 0 :: RawPageIndex (Entry SerialisedValue BlobSpan)
     case res of
       IndexEntry k _ -> do
         putStrLn $ "  rawPageIndex page 0    = IndexEntry, key = " ++ renderKey k
