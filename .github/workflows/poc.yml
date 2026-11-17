@@ -29,8 +29,7 @@ jobs:
           cat ../poc-stanza.txt >> lsm-tree/lsm-tree.cabal
           cabal update
 
-      # (A) Production configuration: cabal.project.release, asserts compiled away
-      - name: A. RELEASE config (production)
+      - name: A. RELEASE config (production, asserts compiled away)
         run: |
           cd upstream
           set +e
@@ -38,14 +37,19 @@ jobs:
             --project-file=cabal.project.release \
             --constraint="blockio +serialblockio" > ../A-release.log 2>&1
           echo "BUILD_EXIT=$?" >> ../A-release.log
-          BIN=$(cabal list-bin poc-oob --project-file=cabal.project.release 2>/dev/null)
+          BIN=$(find dist-newstyle -type f -name poc-oob -perm -u+x | head -1)
           echo "binary: $BIN" >> ../A-release.log
-          stdbuf -o0 -e0 "$BIN" >> ../A-release.log 2>&1
-          echo "RUN_EXIT=$?" >> ../A-release.log
+          if [ -n "$BIN" ]; then
+            stdbuf -o0 -e0 "$BIN" >> ../A-release.log 2>&1
+            RC=$?
+            echo "RUN_EXIT=$RC" >> ../A-release.log
+            if [ $RC -gt 128 ]; then echo "SIGNAL=$((RC-128)) (SIGSEGV=11 SIGABRT=6)" >> ../A-release.log; fi
+          else
+            echo "RUN_EXIT=NOBIN" >> ../A-release.log
+          fi
         continue-on-error: true
 
-      # (B) Same release config, asserts restored -> proves the guard exists and fires
-      - name: B. RELEASE config + asserts restored
+      - name: B. RELEASE config + asserts restored (guard proof)
         run: |
           cd upstream
           set +e
@@ -55,11 +59,16 @@ jobs:
             --ghc-options="-fno-ignore-asserts" \
             --builddir=dist-asserts > ../B-release-asserts.log 2>&1
           echo "BUILD_EXIT=$?" >> ../B-release-asserts.log
-          BIN=$(cabal list-bin poc-oob --project-file=cabal.project.release \
-                  --ghc-options="-fno-ignore-asserts" --builddir=dist-asserts 2>/dev/null)
+          BIN=$(find dist-asserts -type f -name poc-oob -perm -u+x | head -1)
           echo "binary: $BIN" >> ../B-release-asserts.log
-          stdbuf -o0 -e0 "$BIN" >> ../B-release-asserts.log 2>&1
-          echo "RUN_EXIT=$?" >> ../B-release-asserts.log
+          if [ -n "$BIN" ]; then
+            stdbuf -o0 -e0 "$BIN" >> ../B-release-asserts.log 2>&1
+            RC=$?
+            echo "RUN_EXIT=$RC" >> ../B-release-asserts.log
+            if [ $RC -gt 128 ]; then echo "SIGNAL=$((RC-128)) (SIGSEGV=11 SIGABRT=6)" >> ../B-release-asserts.log; fi
+          else
+            echo "RUN_EXIT=NOBIN" >> ../B-release-asserts.log
+          fi
         continue-on-error: true
 
       - uses: actions/upload-artifact@v4
