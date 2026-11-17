@@ -177,7 +177,7 @@ main = do
           putStrLn "  importSnapshot: OK -- no exception, CRC check passed"
 
           -- (3) open the table and read -- this is where the run page is parsed
-          putStrLn "\n[3] withTableFromSnapshot + lookups (walks the tampered page)"
+          putStrLn "\n[3] withTableFromSnapshot + lookups (batch/arena path)"
           withTableFromSnapshot session "snap2" "KeyValueBlob" $ \(table2 :: Table IO Key Value Void) -> do
             r <- try $ do
                    rs <- lookups table2 (V.fromList (map Key [1..6]))
@@ -189,8 +189,24 @@ main = do
               Right vs -> do
                 putStrLn $ "  lookups returned        = " ++ show vs
                 case tamperInfo of
-                  Nothing -> putStrLn "  RESULT: INCONCLUSIVE -- bundle was not tampered, lookups are the legitimate ones"
-                  Just _  -> putStrLn "  RESULT: FAIL-OPEN -- tampered page was parsed and served"
+                  Nothing -> putStrLn "  RESULT: INCONCLUSIVE -- bundle was not tampered"
+                  Just _  -> putStrLn "  RESULT: tampered page accepted and consumed (no error raised)"
+
+            -- (4) force a merge: merging runs reads them SEQUENTIALLY through
+            -- RunReader.readDiskPage, which allocates EXACTLY pageSize bytes --
+            -- that is the path where the offset is a genuine heap OOB read.
+            putStrLn "\n[4] force a merge -> RunReader sequential path (exactly-4096-byte pages)"
+            r2 <- try $ do
+                    inserts table2 $ V.fromList [ (Key k, Value (k * 10), Nothing) | k <- [7..40] ]
+                    rs2 <- lookups table2 (V.fromList (map Key [1..40]))
+                    mapM evaluate (V.toList (V.map getValue rs2))
+            case r2 of
+              Left (e :: SomeException) -> do
+                putStrLn $ "  exception during merge  = " ++ takeLine (show e)
+                putStrLn "  RESULT: bounded (something rejected the tampered page on the sequential path)"
+              Right vs2 -> do
+                putStrLn $ "  after merge, lookups    = " ++ show vs2
+                putStrLn "  RESULT: sequential path consumed the tampered page without error"
             pure ()
       case res of
         Left (e :: SomeException) -> putStrLn $ "\nTOP-LEVEL exception: " ++ takeLine (show e)
