@@ -1,0 +1,13 @@
+
+test-suite poc-oob
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   poc
+  main-is:          Poc.hs
+  build-depends:
+    , base
+    , lsm-tree:core
+    , primitive
+    , vector
+    , bytestring
+  default-language: GHC2021
+  ghc-options:      -rtsopts

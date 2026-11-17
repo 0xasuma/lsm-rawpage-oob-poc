@@ -1,0 +1,68 @@
+name: lsm-rawpage-oob
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  poc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: '9.8.4'
+          cabal-version: '3.12'
+
+      - name: Fetch upstream lsm-tree at audited commit
+        run: |
+          git clone https://github.com/IntersectMBO/lsm-tree.git upstream
+          cd upstream
+          git checkout 63a6305
+          git log --oneline -1
+          mkdir -p lsm-tree/poc
+          cp ../Poc.hs lsm-tree/poc/Poc.hs
+          cat ../poc-stanza.cabal >> lsm-tree/lsm-tree.cabal
+          printf 'index-state: hackage.haskell.org 2025-06-01T00:00:00Z\n' > cabal.project.local
+          cabal update
+
+      - name: Build+run RELEASE semantics
+        run: |
+          cd upstream
+          cabal test poc-oob \
+            --project-file=cabal.project.release \
+            --flags="blockio:serialblockio" \
+            --ghc-options="-O0 -fignore-asserts" \
+            --test-show-details=streaming > ../release.log 2>&1
+          echo "EXIT=$?" >> ../release.log
+        continue-on-error: true
+
+      - name: Build+run DEV semantics
+        run: |
+          cd upstream
+          cabal test poc-oob \
+            --project-file=cabal.project \
+            --flags="blockio:serialblockio" \
+            --test-show-details=streaming > ../dev.log 2>&1
+          echo "EXIT=$?" >> ../dev.log
+        continue-on-error: true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "===== RELEASE LOG (tail 70) ====="
+          tail -70 release.log || true
+          echo "===== DEV LOG (tail 50) ====="
+          tail -50 dev.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: poc-logs
+          path: |
+            release.log
+            dev.log
