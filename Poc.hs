@@ -134,9 +134,12 @@ main = do
 
           -- (1) the exported bundle is a legitimate snapshot at this point
           putStrLn "\n[1] legitimate bundle exported via exportSnapshot"
+          allFiles <- listAllFiles work
+          putStrLn "  files under the session root:"
+          mapM_ (\f -> putStrLn ("    " ++ f)) allFiles
           tamperInfo <- tamperBundle (work </> "export") 0xFFF0
           case tamperInfo of
-            Nothing -> putStrLn "  TAMPER FAILED -- no .kops/.checksums found"
+            Nothing -> putStrLn "  TAMPER FAILED -- no .kops/.checksums found under export/"
             Just s  -> putStrLn $ "  tampered: " ++ s
 
           -- (2) import the tampered bundle through the public API
@@ -156,7 +159,9 @@ main = do
                 putStrLn "  RESULT: bounded (something rejected the tampered page)"
               Right vs -> do
                 putStrLn $ "  lookups returned        = " ++ show vs
-                putStrLn "  RESULT: FAIL-OPEN -- tampered page was parsed and served"
+                case tamperInfo of
+                  Nothing -> putStrLn "  RESULT: INCONCLUSIVE -- bundle was not tampered, lookups are the legitimate ones"
+                  Just _  -> putStrLn "  RESULT: FAIL-OPEN -- tampered page was parsed and served"
             pure ()
       case res of
         Left (e :: SomeException) -> putStrLn $ "\nTOP-LEVEL exception: " ++ takeLine (show e)
