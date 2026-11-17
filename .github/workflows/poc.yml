@@ -3,7 +3,7 @@ name: lsm-rawpage-oob
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
 
 jobs:
   poc:
@@ -29,39 +29,56 @@ jobs:
           cat ../poc-stanza.txt >> lsm-tree/lsm-tree.cabal
           cabal update
 
-      - name: Build+run RELEASE semantics
+      # (A) Production configuration: cabal.project.release, no assert restoration
+      - name: A. RELEASE config (production)
         run: |
           cd upstream
           cabal test poc-oob \
             --project-file=cabal.project.release \
             --constraint="blockio +serialblockio" \
-            --ghc-options="-O0 -fignore-asserts" \
-            --test-show-details=streaming > ../release.log 2>&1
-          echo "EXIT=$?" >> ../release.log
+            --test-show-details=streaming > ../A-release.log 2>&1
+          echo "EXIT=$?" >> ../A-release.log
         continue-on-error: true
 
-      - name: Build+run DEV semantics
+      # (B) Same release config but with asserts restored -> proves the guard exists
+      - name: B. RELEASE config + asserts restored
+        run: |
+          cd upstream
+          cabal test poc-oob \
+            --project-file=cabal.project.release \
+            --constraint="blockio +serialblockio" \
+            --ghc-options="-fno-ignore-asserts" \
+            --builddir=dist-asserts \
+            --test-show-details=streaming > ../B-release-asserts.log 2>&1
+          echo "EXIT=$?" >> ../B-release-asserts.log
+        continue-on-error: true
+
+      # (C) Dev configuration (cabal.project: -fno-ignore-asserts + -fcheck-prim-bounds)
+      - name: C. DEV config
         run: |
           cd upstream
           cabal test poc-oob \
             --project-file=cabal.project \
             --constraint="blockio +serialblockio" \
-            --test-show-details=streaming > ../dev.log 2>&1
-          echo "EXIT=$?" >> ../dev.log
+            --builddir=dist-dev \
+            --test-show-details=streaming > ../C-dev.log 2>&1
+          echo "EXIT=$?" >> ../C-dev.log
         continue-on-error: true
 
       - name: Summary
         if: always()
         run: |
-          echo "===== RELEASE LOG (tail 70) ====="
-          tail -70 release.log || true
-          echo "===== DEV LOG (tail 50) ====="
-          tail -50 dev.log || true
+          for f in A-release B-release-asserts C-dev; do
+            echo "########## $f ##########"
+            sed -n '/=== lsm-tree RawPage offset validation PoC ===/,$p' $f.log || tail -20 $f.log
+            echo
+          done
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: poc-logs
           path: |
-            release.log
-            dev.log
+            A-release.log
+            B-release-asserts.log
+            C-dev.log

