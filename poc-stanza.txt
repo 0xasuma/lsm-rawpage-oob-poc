@@ -5,9 +5,16 @@ test-suite poc-oob
   main-is:          Poc.hs
   build-depends:
     , base
+    , lsm-tree
     , lsm-tree:core
+    , fs-api
+    , blockio
     , primitive
     , vector
     , bytestring
+    , directory
+    , filepath
+    , containers
+    , contra-tracer
   default-language: GHC2021
   ghc-options:      -rtsopts
