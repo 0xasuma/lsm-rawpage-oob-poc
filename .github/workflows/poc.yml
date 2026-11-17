@@ -35,7 +35,7 @@ jobs:
           cd upstream
           cabal test poc-oob \
             --project-file=cabal.project.release \
-            --flags="blockio:serialblockio" \
+            --constraint="blockio +serialblockio" \
             --ghc-options="-O0 -fignore-asserts" \
             --test-show-details=streaming > ../release.log 2>&1
           echo "EXIT=$?" >> ../release.log
@@ -46,7 +46,7 @@ jobs:
           cd upstream
           cabal test poc-oob \
             --project-file=cabal.project \
-            --flags="blockio:serialblockio" \
+            --constraint="blockio +serialblockio" \
             --test-show-details=streaming > ../dev.log 2>&1
           echo "EXIT=$?" >> ../dev.log
         continue-on-error: true
