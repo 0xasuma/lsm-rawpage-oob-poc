@@ -1,6 +1,6 @@
 -- | PoC: RawPage trusts page-header offsets with no validation.
 --
--- Target : IntersectMBO/lsm-tree @ 63a6305 (audited 2026-11-17)
+-- Target : IntersectMBO/lsm-tree @ 63a63054 (audited 2026-11-17)
 -- Claim  : rawPageKeys/rawPageKeyAt/rawPageIndex derive byte offsets straight
 --          from the on-disk page header (Word16 numKeys at idx 0, Word16
 --          keysOffset at idx 2). Nothing validates those offsets against the
@@ -24,25 +24,31 @@ module Main (main) where
 
 import           Control.Exception (SomeException, evaluate, try)
 import           Control.Monad (when)
+import           Data.Bits (shiftR, (.&.))
+import           Data.List (foldl')
 import           Data.Primitive.ByteArray
 import           Data.Word (Word16, Word8)
-import           GHC.Exts (RealWorld)
-import           System.Exit (exitFailure)
 import           Database.LSMTree.Internal.RawBytes (RawBytes (..))
 import qualified Database.LSMTree.Internal.RawBytes as RB
 import           Database.LSMTree.Internal.RawPage
 import           Database.LSMTree.Internal.Serialise (SerialisedKey (..))
+import           System.Exit (exitFailure)
 
 pageSize :: Int
 pageSize = 4096
 
--- | Write a Word16 into the array at Word16-index @i@.
-putW16 :: MutableByteArray RealWorld -> Int -> Word16 -> IO ()
-putW16 = writeWord16Array
+-- | Little-endian Word16.
+w16 :: Word16 -> [Word8]
+w16 w = [fromIntegral (w .&. 0xFF), fromIntegral (w `shiftR` 8)]
 
-putBytes :: MutableByteArray RealWorld -> Int -> [Word8] -> IO ()
-putBytes mba off ws =
-    mapM_ (\(i, w) -> writeWord8Array mba (off + i) w) (zip [0 ..] ws)
+-- | Build a pinned ByteArray of @n@ zero bytes with @patches@ (offset, bytes).
+buildPinned :: Int -> [(Int, [Word8])] -> IO ByteArray
+buildPinned n patches = do
+    let bytes = foldl' apply (replicate n 0) patches
+        apply acc (off, ws) = take off acc ++ ws ++ drop (off + length ws) acc
+    mba <- newPinnedByteArray n
+    copyByteArray mba 0 (byteArrayFromList bytes) 0 n
+    unsafeFreezeByteArray mba
 
 sentinel :: [Word8]
 sentinel = map (fromIntegral . fromEnum) "LEAK-OUTSIDE-THE-PAGE"
@@ -51,19 +57,16 @@ sentinel = map (fromIntegral . fromEnum) "LEAK-OUTSIDE-THE-PAGE"
 -- 4096-byte page region.
 variantOutsidePageRegion :: IO ()
 variantOutsidePageRegion = do
-    mba <- newPinnedByteArray (2 * pageSize) :: IO (MutableByteArray RealWorld)
-    fillByteArray mba 0 (2 * pageSize) 0
-    -- header: numKeys=2, numBlobs=0, keysOffset=4096 (bytes) -> Word16 idx 2048
-    putW16 mba 0 2
-    putW16 mba 1 0
-    putW16 mba 2 (fromIntegral pageSize)
-    -- offsets vector sits at byte 4096: [5000, 5005, 5005]
-    putW16 mba 2048 5000
-    putW16 mba 2049 5005
-    putW16 mba 2050 5005
-    -- the "key" payload lives at byte 5000 -- outside the page region
-    putBytes mba 5000 sentinel
-    ba <- unsafeFreezeByteArray mba
+    -- header: numKeys=2 (idx 0), numBlobs=0 (idx 1), keysOffset=4096 (idx 2)
+    -- offsets vector at byte 4096 (Word16 idx 2048): [5000, 5005, 5005]
+    -- sentinel payload at byte 5000 -- outside the page region
+    ba <- buildPinned (2 * pageSize)
+            [ (0,    w16 2)
+            , (2,    w16 0)
+            , (4,    w16 (fromIntegral pageSize))
+            , (4096, w16 5000 ++ w16 5005 ++ w16 5005)
+            , (5000, sentinel)
+            ]
     let page = unsafeMakeRawPage ba 0
     putStrLn $ "  sizeofByteArray        = " ++ show (sizeofByteArray ba)
     putStrLn $ "  page region            = bytes 0..4095"
@@ -80,12 +83,11 @@ variantOutsidePageRegion = do
 -- | Production shape: array is exactly 4096 bytes, header points far outside.
 variantPastEndOfAllocation :: IO ()
 variantPastEndOfAllocation = do
-    mba <- newPinnedByteArray pageSize :: IO (MutableByteArray RealWorld)
-    fillByteArray mba 0 pageSize 0
-    putW16 mba 0 2
-    putW16 mba 1 0
-    putW16 mba 2 0xFFF0          -- keys section "at byte 65520" in a 4096-byte page
-    ba <- unsafeFreezeByteArray mba
+    ba <- buildPinned pageSize
+            [ (0, w16 2)
+            , (2, w16 0)
+            , (4, w16 0xFFF0)   -- keys section "at byte 65520" in a 4096-byte page
+            ]
     let page = unsafeMakeRawPage ba 0
     r <- try (evaluate (length (rawPageKeys page))) :: IO (Either SomeException Int)
     putStrLn $ "  sizeofByteArray        = " ++ show (sizeofByteArray ba)

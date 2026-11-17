@@ -27,7 +27,6 @@ jobs:
           mkdir -p lsm-tree/poc
           cp ../Poc.hs lsm-tree/poc/Poc.hs
           cat ../poc-stanza.txt >> lsm-tree/lsm-tree.cabal
-          printf 'index-state: hackage.haskell.org 2025-06-01T00:00:00Z\n' > cabal.project.local
           cabal update
 
       - name: Build+run RELEASE semantics
