@@ -41,7 +41,7 @@ import           Database.LSMTree (ResolveValue, Salt, SerialiseKey,
                      withTableFromSnapshot, withTableWith)
 import qualified Database.LSMTree.Internal.CRC32C as CRC
 import qualified System.Directory as Dir
-import           System.FilePath ((</>))
+import           System.FilePath (takeDirectory, (</>))
 import qualified System.FS.API as FS
 import           System.FS.BlockIO.IO (defaultIOCtxParams, withIOHasBlockIO)
 
@@ -78,40 +78,56 @@ listAllFiles d = do
                                    isD <- Dir.doesDirectoryExist p
                                    if isD then listAllFiles p else pure [p]) entries
 
--- | Overwrite the keysOffset of page 0 in the first @.kops@ file, then repair
--- the CRC32C entry for that file in the bundle's @.checksums@ file.
+-- | Overwrite the keysOffset of page 0 in EVERY @.keyops@ file, then repair
+-- every CRC32C entry in the bundle's @.checksums@ files. This is exactly what
+-- an attacker who ships a hand-crafted bundle does: the checksums are theirs
+-- to compute.
 tamperBundle :: FilePath -> Word16 -> IO (Maybe String)
 tamperBundle root bogusOffset = do
     files <- listAllFiles root
-    let kops = [f | f <- files, ".kops" `isSuffixOf` f]
-        sums = [f | f <- files, ".checksums" `isSuffixOf` f]
-    case (kops, sums) of
-      ([], _) -> pure Nothing
-      (_, []) -> pure Nothing
-      (kf:_, sf:_) -> do
-        bs <- BS.readFile kf
-        let patched = BS.take keysOffsetField bs
-                        <> BS.pack (w16le bogusOffset)
-                        <> BS.drop (keysOffsetField + 2) bs
-        BS.writeFile kf patched
-        -- recompute CRC32C of the patched file, purely, in memory
-        let newCrc = CRC.updateCRC32C patched CRC.initialCRC32C
-            CRC.CRC32C crcW = newCrc
-        -- rewrite the checksums entry for this file's basename
-        txt <- BS.readFile sf
-        let name = BSC.pack (last (splitSlash kf))
-            linesT = BSC.lines txt
-            fixLine l
-              | ("CRC32C (" <> name <> ") = ") `BS.isPrefixOf` l
-              = "CRC32C (" <> name <> ") = " <> BSC.pack (hex8 (fromIntegral crcW))
-              | otherwise = l
-        BS.writeFile sf (BS.intercalate "\n" (map fixLine linesT) <> "\n")
-        pure $ Just (kf ++ "  keysOffset 0x" ++ hex8 (fromIntegral bogusOffset)
-                     ++ "  newCRC=" ++ hex8 (fromIntegral crcW))
+    let keyops = [f | f <- files, ".keyops" `isSuffixOf` f]
+        sums   = [f | f <- files, ".checksums" `isSuffixOf` f]
+    if null keyops || null sums
+      then pure Nothing
+      else do
+        mapM_ (patchFile bogusOffset) keyops
+        mapM_ repairChecksums sums
+        pure $ Just (show (length keyops) ++ " .keyops patched at keysOffset=0x"
+                     ++ hex8 (fromIntegral bogusOffset)
+                     ++ ", " ++ show (length sums) ++ " .checksums repaired")
   where
-    splitSlash s = case break (== '/') s of
-                     (a, '/':rest) -> a : splitSlash rest
-                     (a, _)       -> [a]
+    patchFile off f = do
+        bs <- BS.readFile f
+        let patched = BS.take keysOffsetField bs
+                        <> BS.pack (w16le off)
+                        <> BS.drop (keysOffsetField + 2) bs
+        BS.writeFile f patched
+
+    -- for every "CRC32C (name) = hex" line, if a sibling file @name@ exists,
+    -- recompute its CRC32C from the (possibly patched) bytes on disk
+    repairChecksums sf = do
+        let dir = takeDirectory sf
+        txt <- BS.readFile sf
+        out <- mapM (fixLine dir) (BSC.lines txt)
+        BS.writeFile sf (BS.intercalate "\n" out <> "\n")
+
+    fixLine dir l =
+        case BSC.stripPrefix "CRC32C (" l of
+          Nothing -> pure l
+          Just rest ->
+            case BSC.break (== ')') rest of
+              (name, rest2)
+                | Just rhs <- BSC.stripPrefix ") = " rest2
+                , BSC.length rhs == 8 -> do
+                    let fp = dir ++ "/" ++ BSC.unpack name
+                    exists <- Dir.doesFileExist fp
+                    if not exists then pure l else do
+                      bs <- BS.readFile fp
+                      let CRC.CRC32C w = CRC.updateCRC32C bs CRC.initialCRC32C
+                      pure $ "CRC32C (" <> name <> ") = "
+                             <> BSC.pack (hex8 (fromIntegral w))
+              _ -> pure l
+
 
 main :: IO ()
 main = do
