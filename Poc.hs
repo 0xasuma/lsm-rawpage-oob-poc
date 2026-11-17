@@ -41,7 +41,7 @@ import           Database.LSMTree (ResolveValue, Salt, SerialiseKey,
                      withTableFromSnapshot, withTableWith)
 import qualified Database.LSMTree.Internal.CRC32C as CRC
 import qualified System.Directory as Dir
-import           System.FilePath (takeDirectory, (</>))
+import           System.FilePath (takeBaseName, takeDirectory, (</>))
 import qualified System.FS.API as FS
 import           System.FS.BlockIO.IO (defaultIOCtxParams, withIOHasBlockIO)
 
@@ -115,12 +115,13 @@ tamperBundle root bogusOffset = do
     -- for every "CRC32C (name) = hex" line, if a sibling file @name@ exists,
     -- recompute its CRC32C from the (possibly patched) bytes on disk
     repairChecksums sf = do
-        let dir = takeDirectory sf
+        let dir  = takeDirectory sf
+            base = takeBaseName sf
         txt <- BS.readFile sf
-        out <- mapM (fixLine dir) (BSC.lines txt)
+        out <- mapM (fixLine dir base) (BSC.lines txt)
         BS.writeFile sf (BS.intercalate "\n" out <> "\n")
 
-    fixLine dir l =
+    fixLine dir base l =
         case BSC.stripPrefix "CRC32C (" l of
           Nothing -> pure l
           Just rest ->
@@ -128,14 +129,14 @@ tamperBundle root bogusOffset = do
               (name, rest2)
                 | Just rhs <- BSC.stripPrefix ") = " rest2
                 , BSC.length rhs == 8 -> do
-                    let fp = dir ++ "/" ++ BSC.unpack name
+                    let fp = dir </> (base ++ "." ++ BSC.unpack name)
                     exists <- Dir.doesFileExist fp
                     if not exists
-                      then do putStrLn ("      !! no sibling file for entry: " ++ BSC.unpack name)
-                              pure l
+                      then pure l
                       else do
                       bs <- BS.readFile fp
                       let CRC.CRC32C w = CRC.updateCRC32C bs CRC.initialCRC32C
+                      putStrLn ("      recalc " ++ fp ++ " -> " ++ hex8 (fromIntegral w))
                       pure $ "CRC32C (" <> name <> ") = "
                              <> BSC.pack (hex8 (fromIntegral w))
               _ -> pure l
