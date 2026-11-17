@@ -30,6 +30,7 @@ import           Data.Char (intToDigit)
 import           Data.List (isSuffixOf)
 import           Data.Monoid (Sum (..))
 import qualified Data.Vector as V
+import           Data.Void (Void)
 import           Data.Word (Word16, Word64, Word8)
 import           Database.LSMTree (ResolveValue, Salt, SerialiseKey,
                      SerialiseValue, SnapshotMode (..), Table,
@@ -126,8 +127,8 @@ main = do
       FS.createDirectoryIfMissing hfs True sessionDir
 
       res <- try $ withOpenSession nullTracer hfs hbio salt sessionDir $ \session ->
-        withTableWith conf session $ \(table1 :: Table IO Key Value ()) -> do
-          inserts table1 $ V.fromList [ (Key k, Value (k * 10), ()) | k <- [1..6] ]
+        withTableWith conf session $ \(table1 :: Table IO Key Value Void) -> do
+          inserts table1 $ V.fromList [ (Key k, Value (k * 10), Nothing) | k <- [1..6] ]
           saveSnapshot "snap1" "KeyValueBlob" table1
           exportSnapshot session "snap1" (HardLink False) exportDir
 
@@ -145,10 +146,10 @@ main = do
 
           -- (3) open the table and read -- this is where the run page is parsed
           putStrLn "\n[3] withTableFromSnapshot + lookups (walks the tampered page)"
-          withTableFromSnapshot session "snap2" "KeyValueBlob" $ \(table2 :: Table IO Key Value ()) -> do
+          withTableFromSnapshot session "snap2" "KeyValueBlob" $ \(table2 :: Table IO Key Value Void) -> do
             r <- try $ do
                    rs <- lookups table2 (V.fromList (map Key [1..6]))
-                   mapM evaluate (map getValue rs)
+                   mapM evaluate (V.toList (V.map getValue rs))
             case r of
               Left (e :: SomeException) -> do
                 putStrLn $ "  exception during lookup = " ++ takeLine (show e)
