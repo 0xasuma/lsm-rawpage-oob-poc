@@ -29,52 +29,45 @@ jobs:
           cat ../poc-stanza.txt >> lsm-tree/lsm-tree.cabal
           cabal update
 
-      - name: A. RELEASE config (production, asserts compiled away)
+      - name: Build A (release/production) and B (release + asserts restored)
         run: |
           cd upstream
           set +e
-          cabal build poc-oob \
-            --project-file=cabal.project.release \
-            --constraint="blockio +serialblockio" > ../A-release.log 2>&1
-          echo "BUILD_EXIT=$?" >> ../A-release.log
-          BIN=$(find dist-newstyle -type f -name poc-oob -perm -u+x | head -1)
-          echo "binary: $BIN" >> ../A-release.log
-          if [ -n "$BIN" ]; then
-            stdbuf -o0 -e0 "$BIN" >> ../A-release.log 2>&1
-            RC=$?
-            echo "RUN_EXIT=$RC" >> ../A-release.log
-            if [ $RC -gt 128 ]; then echo "SIGNAL=$((RC-128)) (SIGSEGV=11 SIGABRT=6)" >> ../A-release.log; fi
-          else
-            echo "RUN_EXIT=NOBIN" >> ../A-release.log
-          fi
-        continue-on-error: true
-
-      - name: B. RELEASE config + asserts restored (guard proof)
-        run: |
-          cd upstream
-          set +e
-          cabal build poc-oob \
-            --project-file=cabal.project.release \
+          cabal build poc-oob --project-file=cabal.project.release \
+            --constraint="blockio +serialblockio" > /dev/null 2>&1
+          echo "A_BUILD=$?"
+          cabal build poc-oob --project-file=cabal.project.release \
             --constraint="blockio +serialblockio" \
-            --ghc-options="-fno-ignore-asserts" \
-            --builddir=dist-asserts > ../B-release-asserts.log 2>&1
-          echo "BUILD_EXIT=$?" >> ../B-release-asserts.log
-          BIN=$(find dist-asserts -type f -name poc-oob -perm -u+x | head -1)
-          echo "binary: $BIN" >> ../B-release-asserts.log
-          if [ -n "$BIN" ]; then
-            stdbuf -o0 -e0 "$BIN" >> ../B-release-asserts.log 2>&1
-            RC=$?
-            echo "RUN_EXIT=$RC" >> ../B-release-asserts.log
-            if [ $RC -gt 128 ]; then echo "SIGNAL=$((RC-128)) (SIGSEGV=11 SIGABRT=6)" >> ../B-release-asserts.log; fi
-          else
-            echo "RUN_EXIT=NOBIN" >> ../B-release-asserts.log
-          fi
-        continue-on-error: true
+            --ghc-options="-fno-ignore-asserts" --builddir=dist-asserts > /dev/null 2>&1
+          echo "B_BUILD=$?"
+
+      - name: Run 2x2 matrix (control vs tampered, x2 build configs)
+        run: |
+          cd upstream
+          set +e
+          BA=$(find dist-newstyle -type f -name poc-oob -perm -u+x | head -1)
+          BB=$(find dist-asserts   -type f -name poc-oob -perm -u+x | head -1)
+          run() { # label binary extra-arg
+            local lbl=$1 bin=$2 arg=$3 out="../$1.log"
+            : > "$out"
+            echo "### $lbl  binary=$bin  arg=${arg:-<none>}" >> "$out"
+            "$bin" $arg >> "$out" 2>&1
+            local rc=$?
+            echo "RUN_EXIT=$rc" >> "$out"
+            [ $rc -gt 128 ] && echo "SIGNAL=$((rc-128))  (11=SIGSEGV 6=SIGABRT 4=SIGILL)" >> "$out"
+            echo "--- $lbl RUN_EXIT=$rc ---"
+          }
+          run A1-prod-control   "$BA" "--control"
+          run A2-prod-tampered  "$BA" ""
+          run B1-assert-control "$BB" "--control"
+          run B2-assert-tampered "$BB" ""
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: poc-logs
           path: |
-            A-release.log
-            B-release-asserts.log
+            A1-prod-control.log
+            A2-prod-tampered.log
+            B1-assert-control.log
+            B2-assert-tampered.log
