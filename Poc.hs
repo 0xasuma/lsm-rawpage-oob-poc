@@ -92,7 +92,9 @@ variantKeys = do
 variantProductionPath :: IO Bool
 variantProductionPath = do
     page <- craftedPage
-    r <- try (evaluate (rawPageIndex page 0 :: RawPageIndex (Entry SerialisedValue BlobSpan)))
+    r <- try (evaluate (rawPageIndex page 0
+                          :: RawPageIndex (Entry SerialisedValue BlobSpan)))
+           :: IO (Either SomeException (RawPageIndex (Entry SerialisedValue BlobSpan)))
     case r of
       Left e -> do
         putStrLn $ "  exception              = " ++ show e
